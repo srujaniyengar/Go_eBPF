@@ -1,14 +1,56 @@
+/*
+ * ==============================================================
+ *   Go + eBPF Program: Block TCP Traffic on a Specific Port
+ * ==============================================================
+ *
+ * Purpose:
+ * --------
+ * This userspace Go program manages an eBPF traffic control (TCX)
+ * filter that drops all outgoing TCP traffic targeting a specific
+ * TCP port on a given network interface.
+ *
+ * Key Features:
+ * -------------
+ *   - Dynamically attaches an eBPF program (`port_block.c`) to the
+ *     chosen network interface at the **egress** hook.
+ *   - Uses a BPF map (`config_map`) to configure the blocked TCP port.
+ *   - Blocks all packets destined for the configured port, while
+ *     allowing all other traffic to pass.
+ *   - Stays attached until the program is interrupted (Ctrl+C).
+ *
+ * How It Works:
+ * -------------
+ * 1. The program accepts two command-line arguments:
+ *        <interface> <port>
+ *
+ *    Example:
+ *        sudo ./portblock eth0 8080
+ *
+ *    - This attaches the eBPF program to the `eth0` interface.
+ *    - It configures the BPF map so that TCP traffic to port 8080
+ *      is dropped.
+ *
+ * 2. The eBPF program (`drop_tcp_port`) inspects each egress packet:
+ *    - If the packet is IPv4 + TCP, it extracts the TCP header.
+ *    - It checks whether the destination port matches the configured
+ *      blocked port.
+ *    - If so, it drops the packet (TC_ACT_SHOT).
+ *    - Otherwise, the packet passes normally (TC_ACT_OK).
+ * ==============================================================
+ */
+
 package main
 
 import (
 	"fmt"
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/rlimit"
 	"log"
 	"net"
 	"os"
 	"strconv"
+
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/rlimit"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang port_block ../../source/ebpfprog/port_block.c -- -I/usr/include -I/usr/include/x86_64-linux-gnu

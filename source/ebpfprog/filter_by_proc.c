@@ -1,3 +1,40 @@
+/* 
+ * eBPF Traffic Control (tc) program to filter TCP traffic by process and port.
+ *
+ * Overview:
+ * ----------
+ * This program attaches to the TC ingress hook and filters packets
+ * based on both the TCP port and the process ID (PID) of the application.
+ *
+ * Logic:
+ * ------
+ * 1. Parse the Ethernet header and verify the packet is IPv4.
+ * 2. Parse the IPv4 header and ensure the protocol is TCP.
+ * 3. Extract and validate the TCP header.
+ * 4. Look up two values from BPF maps:
+ *      - allowed_port_map: the single TCP port that the target process is allowed to use
+ *      - target_pid_map: the PID of the process being filtered
+ * 5. Retrieve the current process PID using bpf_get_current_pid_tgid().
+ * 6. If the packet is not associated with the target PID, let it pass.
+ * 7. If the source or destination port matches the allowed port, let it pass.
+ * 8. Otherwise, drop the packet.
+ *
+ * Maps:
+ * -----
+ *   allowed_port_map: 
+ *      - key: always 0
+ *      - value: __u16 (the only allowed TCP port for the process)
+ *
+ *   target_pid_map:
+ *      - key: always 0
+ *      - value: __u32 (the PID of the process to restrict)
+ *
+ * Return codes:
+ * -------------
+ *   - TC_ACT_SHOT: Drop the packet
+ *   - TC_ACT_OK:   Allow the packet
+ */
+
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>

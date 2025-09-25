@@ -1,10 +1,73 @@
+/*
+ * ==============================================================
+ *   Go + eBPF Program: Restrict a Process to a Single TCP Port
+ * ==============================================================
+ *
+ * Purpose:
+ * --------
+ * This program demonstrates how to use eBPF and Go (with Cilium’s ebpf
+ * library) to enforce fine-grained, per-process network filtering. It
+ * dynamically restricts a specific Linux process (by PID) so that it
+ * may only send or receive TCP traffic on a single, user-defined port.
+ *
+ * Key Features:
+ * -------------
+ *   - Attaches an eBPF traffic control (TCX) program at the egress hook
+ *     of a chosen network interface.
+ *   - Identifies a target process by its name (using `pgrep`) and tracks
+ *     its PID over time, even if the process restarts.
+ *   - Uses two BPF maps to configure runtime policies:
+ *       1. `allowed_port_map` – the TCP port allowed for the target process
+ *       2. `target_pid_map`   – the PID of the target process
+ *   - Periodically refreshes the PID in case the process is restarted
+ *     (so filtering automatically continues without manual intervention).
+ *   - Blocks all egress TCP traffic from the process except for the
+ *     allowed port.
+ *
+ * How It Works:
+ * -------------
+ * 1. You run this Go program with three arguments:
+ *        <interface> <process_name> <port>
+ *
+ *    Example:
+ *        sudo ./prog eth0 myserver 8080
+ *
+ *    - This attaches the eBPF program to the `eth0` interface.
+ *    - It finds the PID of the process named `myserver`.
+ *    - It updates the BPF maps so that only TCP port 8080 traffic
+ *      from `myserver` is permitted.
+ *
+ * 2. The eBPF program (compiled from `filter_by_proc.c`) is loaded
+ *    into the kernel and attached to TC egress via the new TCX API.
+ *
+ * 3. Every outgoing TCP packet is inspected:
+ *    - If it originates from the target PID, the packet’s TCP source
+ *      and destination ports are checked.
+ *    - If either matches the allowed port, the packet passes.
+ *    - Otherwise, the packet is dropped.
+ *    - If the PID doesn’t match, the packet is left untouched.
+ *
+ * 4. A background goroutine monitors the process:
+ *    - If the process restarts with a new PID, the PID in the map is
+ *      updated automatically.
+ *    - If the process disappears, the PID is cleared (traffic blocked).
+ *
+ *
+ * Notes:
+ * ------
+ *   - If the process restarts, the program automatically detects
+ *     the PID change and updates the BPF maps.
+ *   - If multiple processes share the same name, only the first PID
+ *     returned by `pgrep` is used.
+ *   - This is an **egress filter** only. Incoming packets are not filtered.
+ *   - The program requires root privileges.
+ * ==============================================================
+ */
+
 package main
 
 import (
 	"fmt"
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/rlimit"
 	"log"
 	"net"
 	"os"
@@ -14,6 +77,10 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
+	"github.com/cilium/ebpf/rlimit"
 )
 
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang filter_by_proc ../../source/ebpfprog/filter_by_proc.c -- -I/usr/include -I/usr/include/x86_64-linux-gnu
@@ -118,10 +185,8 @@ func main() {
 	fmt.Printf("Filtering process '%s' (PID: %d) - allowing only port %d\n", processName, targetPid, port)
 	fmt.Println("Press Ctrl+C to stop...")
 
-	// Monitor process in the background
 	go monitorProcess(processName, &targetPid)
 
-	// Update PID in map periodically
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()

@@ -1,3 +1,29 @@
+/*
+ * eBPF Traffic Control (tc) program for dropping TCP packets on a configurable port.
+ *
+ * Overview:
+ * ----------
+ * This program attaches to the TC ingress hook and inspects network packets.
+ * It performs the following steps:
+ *   1. Parse the Ethernet header and ensure the packet is IPv4.
+ *   2. Parse the IPv4 header and check if the packet uses TCP as the transport protocol.
+ *   3. Extract the TCP header and validate boundaries to ensure packet safety.
+ *   4. Look up a target TCP destination port from a BPF map (config_map).
+ *   5. If the packet’s TCP destination port matches the configured value, drop the packet.
+ *   6. Otherwise, allow the packet to pass.
+ *
+ * Map:
+ * ----
+ *   config_map: A BPF array map with a single entry that stores the TCP port to filter.
+ *   - key: always 0
+ *   - value: __u16 (destination TCP port to drop)
+ *
+ * Return codes:
+ * -------------
+ *   - TC_ACT_SHOT: Drop the packet
+ *   - TC_ACT_OK:   Let the packet pass
+ */
+
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/ip.h>
@@ -7,7 +33,6 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-// BPF map to hold the target TCP port to be dropped.
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -15,20 +40,17 @@ struct {
     __type(value, __u16);
 } config_map SEC(".maps");
 
-// TC program to filter and drop packets on a specific TCP port.
 SEC("tc")
 int drop_tcp_port(struct __sk_buff *skb)
 {
     void *data = (void *)(long)skb->data;
     void *data_end = (void *)(long)skb->data_end;
 
-    // L2
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) {
         return TC_ACT_OK;
     }
 
-//only ipv4
     if (eth->h_proto != bpf_htons(ETH_P_IP)) {
         return TC_ACT_OK;
     }
@@ -38,25 +60,21 @@ int drop_tcp_port(struct __sk_buff *skb)
         return TC_ACT_OK;
     }
 
-    // TCP
     if (ip->protocol != IPPROTO_TCP) {
         return TC_ACT_OK;
     }
 
-    // L4
     struct tcphdr *tcp = (void *)ip + (ip->ihl * 4);
     if ((void *)(tcp + 1) > data_end) {
-        return TC_ACT_OK; // Not a valid TCP segment
+        return TC_ACT_OK;
     }
 
-    // Retrieve the target port from the configuration map.
     __u32 key = 0;
     __u16 *target_port = bpf_map_lookup_elem(&config_map, &key);
     if (!target_port) {
         return TC_ACT_OK;
     }
 
-    // cmp destination with target
     if (bpf_ntohs(tcp->dest) == *target_port) {
         return TC_ACT_SHOT;
     }
